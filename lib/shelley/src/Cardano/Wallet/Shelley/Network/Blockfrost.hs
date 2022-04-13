@@ -1,9 +1,11 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -11,7 +13,11 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
+
+{-# OPTIONS_GHC -Wno-unused-imports #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- |
 -- Copyright: © 2020 IOHK
@@ -23,31 +29,53 @@ module Cardano.Wallet.Shelley.Network.Blockfrost
     ( withNetworkLayer
     , Log
 
-    -- * Blockfrost <-> Cardano translation
-    , blockToBlockHeader
-
     -- * Internal
     , getPoolPerformanceEstimate
     , eraByEpoch
+    , fetchBlock
+    , fetchTransaction
+    , newClientConfig
+    , BFM (..)
+    , runBFM
+    , BlockfrostError (..)
     ) where
 
 import Prelude
 
 import qualified Blockfrost.Client as BF
 import qualified Cardano.Api.Shelley as Node
+import qualified Cardano.Binary as CBOR
+import qualified Cardano.Ledger.Shelley.Metadata as Shelley
+import qualified Cardano.Wallet.Network.Light as LN
+import qualified Data.Aeson as Json
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
+import qualified Data.Text as T
+import qualified Data.Vector as Vec
+import qualified Ouroboros.Consensus.Cardano.Block as OC
 import qualified Ouroboros.Consensus.HardFork.History.Qry as HF
 
 import Cardano.Api
     ( AnyCardanoEra (..)
+    , AsType (AsTxMetadata)
     , CardanoEra (AllegraEra, AlonzoEra, ByronEra, MaryEra, ShelleyEra)
+    , CardanoEraStyle (LegacyByronEra, ShelleyBasedEra)
     , ExecutionUnitPrices (priceExecutionMemory, priceExecutionSteps)
     , ExecutionUnits (executionMemory, executionSteps)
     , NetworkId (..)
     , NetworkMagic (..)
+    , TxMetadata (TxMetadata)
+    , TxMetadataValue (..)
+    , cardanoEraStyle
+    , makeTransactionMetadata
+    , proxyToAsType
     )
+import Cardano.Api.Shelley
+    ( fromShelleyMetadata )
+import Cardano.Binary
+    ( fromCBOR )
 import Cardano.BM.Data.Severity
     ( Severity (..) )
 import Cardano.BM.Tracer
@@ -59,11 +87,13 @@ import Cardano.Pool.Rank
 import Cardano.Pool.Rank.Likelihood
     ( BlockProduction (..), PerformanceEstimate (..), estimatePoolPerformance )
 import Cardano.Wallet.Api.Types
-    ( encodeStakeAddress )
+    ( decodeAddress, decodeStakeAddress, encodeStakeAddress )
 import Cardano.Wallet.Logging
     ( BracketLog, bracketTracer )
 import Cardano.Wallet.Network
-    ( NetworkLayer (..) )
+    ( ChainFollower, NetworkLayer (..) )
+import Cardano.Wallet.Network.Light
+    ( LightBlocks, LightSyncSource (..) )
 import Cardano.Wallet.Primitive.Slotting
     ( PastHorizonException
     , TimeInterpreter
@@ -71,58 +101,101 @@ import Cardano.Wallet.Primitive.Slotting
     , mkTimeInterpreter
     )
 import Cardano.Wallet.Primitive.Types
-    ( BlockHeader (..)
+    ( Block (..)
+    , BlockHeader (..)
+    , ChainPoint (..)
     , DecentralizationLevel (..)
-    , EpochNo (EpochNo)
+    , DelegationCertificate (..)
+    , EpochNo (..)
     , ExecutionUnitPrices (..)
     , ExecutionUnits (..)
     , FeePolicy (LinearFee)
-    , GenesisParameters (GenesisParameters)
+    , GenesisParameters (..)
     , LinearFunction (..)
     , MinimumUTxOValue (..)
-    , NetworkParameters (NetworkParameters)
+    , NetworkParameters (..)
     , ProtocolParameters (..)
     , SlotNo (..)
     , SlottingParameters (..)
     , StartTime
     , TokenBundleMaxSize (..)
     , TxParameters (..)
+    , decodePoolIdBech32
     , emptyEraInfo
     , executionMemory
     , executionSteps
     , genesisParameters
     , getGenesisBlockDate
+    , header
+    , slottingParameters
+    , stabilityWindowByron
+    , stabilityWindowShelley
     )
+import Cardano.Wallet.Primitive.Types.Address
+    ( Address )
 import Cardano.Wallet.Primitive.Types.Coin
     ( Coin (Coin, unCoin) )
 import Cardano.Wallet.Primitive.Types.Hash
     ( Hash )
 import Cardano.Wallet.Primitive.Types.RewardAccount
     ( RewardAccount )
+import Cardano.Wallet.Primitive.Types.TokenBundle
+    ( TokenBundle (..) )
 import Cardano.Wallet.Primitive.Types.Tx
-    ( TxSize (..) )
+    ( Tx (..)
+    , TxIn (..)
+    , TxOut (..)
+    , TxScriptValidity (TxScriptInvalid, TxScriptValid)
+    , TxSize (..)
+    , txId
+    )
 import Cardano.Wallet.Shelley.Network.Discriminant
     ( SomeNetworkDiscriminant (..), networkDiscriminantToId )
 import Control.Concurrent
     ( threadDelay )
+import Control.Concurrent.Async.Lifted
+    ( concurrently, mapConcurrently )
 import Control.Monad
-    ( forever, (<=<) )
+    ( forever, join, (<=<), (>=>) )
+import Control.Monad.Base
+    ( MonadBase )
 import Control.Monad.Error.Class
     ( MonadError, liftEither, throwError )
+import Control.Monad.IO.Class
+    ( MonadIO (liftIO) )
+import Control.Monad.Reader
+    ( MonadReader, ReaderT (runReaderT), ask, asks )
+import Control.Monad.Trans.Control
+    ( MonadBaseControl )
 import Control.Monad.Trans.Except
     ( ExceptT (..), runExceptT, withExceptT )
+import Data.Align
+    ( align )
+import Data.Bifunctor
+    ( bimap, first )
+import Data.Bitraversable
+    ( bitraverse )
 import Data.Bits
     ( Bits )
+import Data.ByteString
+    ( ByteString )
+import Data.Foldable
+    ( fold )
+import Data.Function
+    ( (&) )
 import Data.Functor
-    ( (<&>) )
+    ( void, (<&>) )
 import Data.Functor.Contravariant
     ( (>$<) )
+import qualified Data.HashMap.Strict as HashMap
 import Data.IntCast
     ( intCast, intCastMaybe )
+import Data.List
+    ( partition )
 import Data.Map
     ( Map )
 import Data.Maybe
-    ( fromMaybe )
+    ( catMaybes, fromMaybe )
 import Data.Proxy
     ( Proxy (..) )
 import Data.Quantity
@@ -130,20 +203,36 @@ import Data.Quantity
     , Quantity (..)
     , mkPercentage
     )
+import Data.Scientific
+    ( Scientific, isInteger, toBoundedInteger )
 import Data.Set
     ( Set )
+import Data.Text
+    ( Text )
 import Data.Text.Class
     ( FromText (fromText), TextDecodingError (..), ToText (..) )
+import Data.Text.Encoding
+    ( encodeUtf8 )
+import Data.These
+    ( These (That, These, This) )
 import Data.Traversable
     ( for )
+import Data.Word
+    ( Word64 )
 import Fmt
     ( pretty )
+import GHC.OldList
+    ( sortOn )
+import GHC.Stack
+    ( HasCallStack )
+import Money
+    ( Discrete' )
 import Ouroboros.Consensus.Block.Abstract
     ( EpochSize (EpochSize) )
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types
     ( RelativeTime (..), mkSlotLength )
 import Ouroboros.Consensus.Cardano.Block
-    ( CardanoBlock, CardanoEras, StandardCrypto )
+    ( CardanoBlock, StandardCrypto )
 import Ouroboros.Consensus.HardFork.History.EraParams
     ( EraParams (EraParams, eraEpochSize, eraSafeZone, eraSlotLength)
     , SafeZone (..)
@@ -156,6 +245,10 @@ import Ouroboros.Consensus.HardFork.History.Summary
     )
 import Ouroboros.Consensus.Util.Counting
     ( NonEmpty (NonEmptyCons, NonEmptyOne) )
+import Servant.Client
+    ( runClientM )
+import Text.Read
+    ( readEither, readMaybe )
 import UnliftIO
     ( throwIO )
 import UnliftIO.Async
@@ -173,7 +266,14 @@ data BlockfrostError
     | IntegralCastError String
     | NoBlockHeight BF.Block
     | InvalidBlockHash BF.BlockHash TextDecodingError
+    | InvalidTxMetadataLabel String
+    | InvalidTxMetadataValue String
+    | InvalidTxHash Text TextDecodingError
+    | InvalidAddress Text TextDecodingError
+    | InvalidPoolId Text TextDecodingError
     | InvalidDecentralizationLevelPercentage Double
+    | InvalidUtxoInputAmount BF.UtxoInput
+    | InvalidUtxoOutputAmount BF.UtxoOutput
     | UnknownEraForEpoch EpochNo
     deriving (Show, Eq)
 
@@ -184,6 +284,7 @@ newtype BlockfrostException = BlockfrostException BlockfrostError
 data Log
     = MsgWatcherUpdate BlockHeader BracketLog
     | MsgTimeInterpreterLog TimeInterpreterLog
+    | MsgLightLayerLog LN.LightLayerLog
 
 instance ToText Log where
     toText = \case
@@ -192,11 +293,14 @@ instance ToText Log where
             ". Callback " <> toText bracketLog <> ". "
         MsgTimeInterpreterLog til ->
             toText til
+        MsgLightLayerLog l ->
+            toText l
 
 instance HasSeverityAnnotation Log where
     getSeverityAnnotation = \case
       MsgWatcherUpdate _ _ -> Info
       MsgTimeInterpreterLog _ -> Info
+      MsgLightLayerLog l -> getSeverityAnnotation l
 
 withNetworkLayer
     :: Tracer IO Log
@@ -205,10 +309,11 @@ withNetworkLayer
     -> BF.Project
     -> (NetworkLayer IO (CardanoBlock StandardCrypto) -> IO a)
     -> IO a
-withNetworkLayer tr network np project k =
+withNetworkLayer tr network np project k = do
+    bfConfig <- newClientConfig project
     k NetworkLayer
         { chainSync = \_tr _chainFollower -> pure ()
-        , lightSync = Nothing
+        , lightSync = Just $ blockfrostLightSync bfConfig
         , currentNodeTip
         , currentNodeEra
         , currentProtocolParameters
@@ -274,10 +379,6 @@ withNetworkLayer tr network np project k =
         fromMaybe (Coin 0) . Map.lookup account <$>
             fetchNetworkRewardAccountBalances network (Set.singleton account)
 
-    handleBlockfrostError :: ExceptT BlockfrostError IO a -> IO a
-    handleBlockfrostError =
-        either (throwIO . BlockfrostException) pure <=< runExceptT
-
     runBlockfrost ::
         forall b w. FromBlockfrost b w => BF.BlockfrostClientT IO b -> IO w
     runBlockfrost =
@@ -287,24 +388,277 @@ withNetworkLayer tr network np project k =
     liftBlockfrost =
         withExceptT ClientError . ExceptT . BF.runBlockfrostClientT project
 
-blockToBlockHeader ::
-    forall m. MonadError BlockfrostError m => BF.Block -> m BlockHeader
-blockToBlockHeader block@BF.Block{..} = do
-    slotNo <- case _blockSlot of
-        Just s -> pure $ SlotNo $ fromIntegral $ BF.unSlot s
-        Nothing -> throwError $ NoSlotError block
-    blockHeight <- case _blockHeight of
-        Just height -> pure $ Quantity $ fromIntegral height
-        Nothing -> throwError $ NoBlockHeight block
-    headerHash <- parseBlockHeader _blockHash
-    parentHeaderHash <- for _blockPreviousBlock parseBlockHeader
-    pure BlockHeader { slotNo, blockHeight, headerHash, parentHeaderHash }
+    blockfrostLightSync ::
+        BF.ClientConfig ->
+        ChainFollower
+            IO
+            ChainPoint
+            BlockHeader
+            (LightBlocks IO Block addr txs)
+        -> IO ()
+    blockfrostLightSync bfConfig follower = do
+        AnyCardanoEra era <- currentNodeEra
+        let stabilityWindow =
+                fromIntegral . getQuantity $ case cardanoEraStyle era of
+                    LegacyByronEra ->
+                        stabilityWindowByron $ slottingParameters np
+                    ShelleyBasedEra _ ->
+                        stabilityWindowShelley $ slottingParameters np
+        let isConsensus = \case
+                ChainPointAtGenesis -> pure True
+                ChainPoint (SlotNo slot) blockHeaderHash -> do
+                    BF.Block {_blockHash = BF.BlockHash bfHeaderHash} <-
+                        BF.getBlockSlot (BF.Slot (toInteger slot))
+                    pure $ bfHeaderHash == toText blockHeaderHash
+        let getBlockHeaderAtHeight :: Integer -> IO (Maybe BlockHeader)
+            getBlockHeaderAtHeight height =
+                either (error . show) Just . fromBlockfrost <$>
+                    BF.getBlock (Left height)
+        let genesisHeader = BlockHeader
+                { slotNo = SlotNo 0
+                , blockHeight = Quantity 0
+                , parentHeaderHash = Nothing
+                , headerHash = either (error . show) id $ fromText
+                    "5f20df933584822601f9e3f8c024eb5e\
+                    \b252fe8cefb24d1317dc3d432e940ebb"
+                }
+        let getBlockHeaderAt :: ChainPoint -> IO (Maybe BlockHeader)
+            getBlockHeaderAt = \case
+                ChainPointAtGenesis -> pure $ Just genesisHeader
+                ChainPoint (SlotNo slot) blockHeaderHash -> do
+                    b@BF.Block {_blockHash = BF.BlockHash bfHeaderHash} <-
+                        BF.getBlockSlot (BF.Slot (toInteger slot))
+                    pure $ if bfHeaderHash == toText blockHeaderHash
+                        then either (error . show) Just $ fromBlockfrost b
+                        else Nothing
+        -- The the next blocks starting at the given 'ChainPoint'.
+        -- Return 'Nothing' if hte point is not consensus anymore.
+        let getNextBlocks :: ChainPoint -> IO (Maybe [Block])
+            getNextBlocks = \case
+                ChainPointAtGenesis -> pure $ Just
+                    [ Block
+                        { header = genesisHeader
+                        , transactions = undefined --  :: ![Tx]
+                        , delegations = [] --  :: ![DelegationCertificate]
+                        }
+                    ]
+                ChainPoint _slotNo hash ->
+                    -- Only one block is fetched for now, even though the type
+                    -- allows for a list of blocks
+                    Just . pure <$> runBFM bfConfig (fetchBlock network hash)
+        -- Transactions for a given address and point range.
+        let getAddressTxs :: BlockHeader -> BlockHeader -> addr -> IO txs
+            getAddressTxs = undefined
+        let lightSyncSource :: LightSyncSource IO Block addr txs
+            lightSyncSource =
+                LightSyncSource
+                    { stabilityWindow
+                    , getHeader = header
+                    , getTip = currentNodeTip
+                    , isConsensus
+                    , getBlockHeaderAtHeight
+                    , getBlockHeaderAt
+                    , getNextBlocks
+                    , getAddressTxs
+                    }
+        void $ LN.lightSync (MsgLightLayerLog >$< tr) lightSyncSource follower
+
+fetchBlock
+    :: forall m
+     . ( MonadError BlockfrostError m
+       , BF.MonadBlockfrost m
+       , MonadBaseControl IO m
+       )
+    => SomeNetworkDiscriminant
+    -> Hash "BlockHeader"
+    -> m Block
+fetchBlock nd hash = do
+    let blockHash = BF.BlockHash (toText hash)
+    block@BF.Block {..} <- BF.getBlock $ Right blockHash
+    header <- fromBlockfrostM block
+    txHashes <- fetchTxHashes blockHash _blockTxCount
+    transactions <- mapConcurrently (fetchTransaction nd) txHashes
+    delegations <- join <$> mapConcurrently (fetchDelegation nd) txHashes
+    pure Block
+        { header
+        , transactions
+        , delegations
+        }
   where
-    parseBlockHeader :: BF.BlockHash -> m (Hash "BlockHeader")
-    parseBlockHeader blockHash =
-        case fromText (BF.unBlockHash blockHash) of
-            Right hash -> pure hash
-            Left tde -> throwError $ InvalidBlockHash blockHash tde
+    fetchTxHashes :: BF.BlockHash -> Integer -> m [BF.TxHash]
+    fetchTxHashes blockHash =
+        fmap concat . traverse (fetchPage blockHash) . pages
+
+    fetchPage :: BF.BlockHash -> BF.Paged -> m [BF.TxHash]
+    fetchPage blockHash page =
+        BF.getBlockTxs' (Right blockHash) page BF.Ascending
+
+    pages :: Integer -> [BF.Paged]
+    pages count =
+        pageNumbers <&> \pageNumber -> BF.Paged { countPerPage, pageNumber }
+        where
+        countPerPage :: Int = 100
+        pageNumbers = [1 .. lastPage]
+        lastPage :: Int = fromIntegral $
+            let (numWholePages, numLast) = quotRem count (intCast countPerPage)
+            in if numLast == 0 then numWholePages else succ numWholePages
+
+fetchDelegation
+    :: forall m
+     . ( MonadError BlockfrostError m
+       , BF.MonadBlockfrost m
+       , MonadBaseControl IO m
+       )
+    => SomeNetworkDiscriminant
+    -> BF.TxHash
+    -> m [DelegationCertificate]
+fetchDelegation (SomeNetworkDiscriminant (Proxy :: Proxy nd)) hash = do
+    delegations <- concurrently (BF.getTxDelegations hash) (BF.getTxStakes hash)
+    certs <- liftEither $ for (uncurry align delegations) $ \case
+        This txDelegation -> pure <$> parseTxDelegation txDelegation
+        That txStake -> pure <$> parseTxStake txStake
+        These txDelegation txStake ->
+            (\d s -> [d, s])
+                <$> parseTxDelegation txDelegation
+                <*> parseTxStake txStake
+    pure $ snd <$> sortOn fst (concat certs)
+  where
+    parseTxDelegation BF.TransactionDelegation{..} = do
+        let addr = BF.unAddress _transactionDelegationAddress
+        rewardAccount <-
+            first (InvalidAddress addr) $ decodeStakeAddress @nd addr
+        poolId <-
+            first (InvalidPoolId addr) . decodePoolIdBech32 $
+                BF.unPoolId _transactionDelegationPoolId
+        pure ( _transactionDelegationCertIndex
+             , CertDelegateFull rewardAccount poolId
+             )
+    parseTxStake BF.TransactionStake{..} = do
+        let addr = BF.unAddress _transactionStakeAddress
+        rewardAccount <-
+            first (InvalidAddress addr) $ decodeStakeAddress @nd addr
+        let action = if _transactionStakeRegistration
+                then CertRegisterKey
+                else CertDelegateNone
+        pure (_transactionStakeCertIndex, action rewardAccount)
+
+fetchTransaction
+    :: forall m
+     . (MonadError BlockfrostError m, BF.MonadBlockfrost m)
+    => SomeNetworkDiscriminant
+    -> BF.TxHash
+    -> m Tx
+fetchTransaction nd hash = do
+  transaction <- BF.getTx hash
+  utxos <- BF.getTxUtxos hash
+  withdrawals <- BF.getTxWithdrawals hash
+  metadata <- BF.getTxMetadataJSON hash
+  assembleTransaction nd transaction utxos withdrawals metadata
+
+assembleTransaction
+    :: forall m
+     . MonadError BlockfrostError m
+    => SomeNetworkDiscriminant
+    -> BF.Transaction
+    -> BF.TransactionUtxos
+    -> [BF.TransactionWithdrawal]
+    -> [BF.TransactionMetaJSON]
+    -> m Tx
+assembleTransaction
+    (SomeNetworkDiscriminant (Proxy :: Proxy nd))
+    BF.Transaction{..}
+    BF.TransactionUtxos{..}
+    txWithdrawals
+    metadataJSON = liftEither $ do
+        txId <- parseTxHash _transactionHash
+        let fee = Just $ Coin $ fromIntegral _transactionFees
+        (resolvedInputs, resolvedCollateral) <-
+                fromInputs _transactionUtxosInputs
+        outputs <- for _transactionUtxosOutputs $ \out@BF.UtxoOutput{..} -> do
+            let outAddr = BF.unAddress _utxoOutputAddress
+            address <- either (throwError . InvalidAddress outAddr) pure $
+                decodeAddress @nd outAddr
+            tokens <- do
+                coin <- case [ lovelaces
+                             | BF.AdaAmount lovelaces <- _utxoOutputAmount ] of
+                    [l] -> fromBlockfrost l
+                    _ -> throwError $ InvalidUtxoOutputAmount out
+                pure $ TokenBundle coin mempty -- TODO: Handle native assets
+            pure TxOut{..}
+        withdrawals <- Map.fromList <$>
+            for txWithdrawals ( \BF.TransactionWithdrawal{..} -> do
+                let addr = BF.unAddress _transactionWithdrawalAddress
+                rewardAccount <-
+                    first (InvalidAddress addr) $ decodeStakeAddress @nd addr
+                coin <- fromBlockfrost _transactionWithdrawalAmount
+                pure (rewardAccount, coin)
+            )
+        metadata <-
+            if null metadataJSON
+            then pure Nothing
+            else Just . TxMetadata . Map.fromList . catMaybes <$>
+                for metadataJSON ( \BF.TransactionMetaJSON{..} -> do
+                    label <- either (throwError . InvalidTxMetadataLabel) pure $
+                        readEither (T.unpack _transactionMetaJSONLabel)
+                    fmap (label,) <$> for _transactionMetaJSONJSONMetadata
+                        (first InvalidTxMetadataValue . unmarshalMetadataValue)
+                    )
+        let scriptValidity = Just $
+                if _transactionValidContract
+                    then TxScriptValid
+                    else TxScriptInvalid
+        pure Tx
+            { txId
+            , fee
+            , resolvedCollateral
+            , resolvedInputs
+            , outputs
+            , withdrawals
+            , metadata
+            , scriptValidity
+            }
+
+  where
+    unmarshalMetadataValue :: Json.Value -> Either String TxMetadataValue
+    unmarshalMetadataValue = \case
+        Json.Object hm ->
+            TxMetaMap <$> for (HashMap.toList hm)
+                ( bitraverse
+                    (unmarshalMetadataValue . Json.String)
+                    unmarshalMetadataValue
+                )
+        Json.Array vec ->
+            TxMetaList . Vec.toList <$> for vec unmarshalMetadataValue
+        Json.String txt ->
+            Right $ TxMetaText txt
+        Json.Number sci ->
+            if isInteger sci
+                then Right (TxMetaNumber (truncate sci))
+                else Left "Non-integer metadata value"
+        Json.Bool b ->
+            Left $ "Expected TxMetadataValue but got bool (" <> show b <> ")"
+        Json.Null ->
+            Left "Expected TxMetadataValue but got null"
+
+    fromInputs
+        :: [BF.UtxoInput]
+        -> Either BlockfrostError ([(TxIn, Coin)], [(TxIn, Coin)])
+    fromInputs utxos =
+        bitraverse f f $ partition BF._utxoInputCollateral utxos
+      where
+        f :: [BF.UtxoInput] -> Either BlockfrostError [(TxIn, Coin)]
+        f = traverse $ \input@BF.UtxoInput{..} -> do
+            txHash <- parseTxHash _utxoInputTxHash
+            txIndex <- _utxoInputOutputIndex <?#> "_utxoInputOutputIndex"
+            coin <-
+                case [ lovelaces
+                        | BF.AdaAmount lovelaces <- _utxoInputAmount ] of
+                    [l] -> fromBlockfrost l
+                    _ -> throwError $ InvalidUtxoInputAmount input
+            pure (TxIn txHash txIndex, coin)
+
+    parseTxHash hash =
+        either (throwError . InvalidTxHash hash) pure $ fromText hash
 
 class FromBlockfrost b w where
     fromBlockfrost :: b -> Either BlockfrostError w
@@ -312,6 +666,8 @@ class FromBlockfrost b w where
 fromBlockfrostM
     :: FromBlockfrost b w => MonadError BlockfrostError m => b -> m w
 fromBlockfrostM = liftEither . fromBlockfrost
+
+
 
 instance FromBlockfrost BF.Block BlockHeader where
     fromBlockfrost block@BF.Block{..} = do
@@ -465,14 +821,23 @@ instance FromBlockfrost BF.ProtocolParams ProtocolParameters where
             , ..
             }
 
+instance FromBlockfrost BF.TxHash (Hash "Tx") where
+    fromBlockfrost txHash =
+        let hash = BF.unTxHash txHash
+        in first (InvalidTxHash hash) $ fromText hash
+
 instance FromBlockfrost BF.Slot SlotNo where
     fromBlockfrost = fmap SlotNo . (<?#> "SlotNo") . BF.unSlot
 
 instance FromBlockfrost BF.Epoch EpochNo where
     fromBlockfrost = pure . fromIntegral
 
+-- type Lovelaces = Discrete' "ADA" '(1000000, 1)
+instance FromBlockfrost (Discrete' "ADA" '(1000000, 1)) Coin where
+  fromBlockfrost lovelaces =
+    Coin <$> (intCast @_ @Integer lovelaces <?#> "Lovelaces")
 
-networkSummary :: NetworkId -> Summary (CardanoEras StandardCrypto)
+networkSummary :: NetworkId -> Summary (OC.CardanoEras OC.StandardCrypto)
 networkSummary = \case
     Mainnet ->
         Summary
@@ -766,3 +1131,32 @@ getPoolPerformanceEstimate sp dl rp pid = do
             / fromIntegral (unCoin $ totalStake rp)
             -- _poolHistoryActiveSize would be incorrect here
         }
+
+newtype BFM a = BFM (ReaderT BF.ClientConfig (ExceptT BlockfrostError IO) a)
+    deriving newtype
+        ( Functor
+        , Applicative
+        , Monad
+        , MonadIO
+        , MonadBase IO
+        , MonadBaseControl IO
+        , MonadReader BF.ClientConfig
+        , MonadError BlockfrostError
+        )
+
+instance BF.MonadBlockfrost BFM where
+  getConf = ask
+  liftBlockfrostClient act = BFM $ do
+    env <- asks fst
+    liftIO (runClientM act env) >>=
+        either (throwError . ClientError . BF.fromServantClientError) pure
+
+newClientConfig :: BF.Project -> IO BF.ClientConfig
+newClientConfig prj = (, prj) <$> BF.newEnvByProject prj
+
+runBFM :: BF.ClientConfig -> BFM a -> IO a
+runBFM cfg (BFM c) = handleBlockfrostError (runReaderT c cfg)
+
+handleBlockfrostError :: ExceptT BlockfrostError IO a -> IO a
+handleBlockfrostError =
+    either (throwIO . BlockfrostException) pure <=< runExceptT
