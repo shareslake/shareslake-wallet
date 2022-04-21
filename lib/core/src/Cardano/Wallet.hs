@@ -3463,6 +3463,7 @@ data ErrConstructTx
     | ErrConstructTxWrongMintingBurningTemplate
     | ErrConstructTxAssetNameTooLong
     | ErrConstructTxMintOrBurnAssetQuantityOutOfBounds
+    | ErrConstructTxWrongValidityBounds
     | ErrConstructTxNotImplemented String
     -- ^ Temporary error constructor.
     deriving (Show, Eq)
