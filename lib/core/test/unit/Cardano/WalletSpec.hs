@@ -1384,6 +1384,8 @@ dummyTransactionLayer = TransactionLayer
         error "dummyTransactionLayer: tokenBundleSizeAssessor not implemented"
     , constraints =
         error "dummyTransactionLayer: constraints not implemented"
+    , toCardanoUTxO =
+        error "dummyTransactionLayer: toCardanoUTxO not implemented"
     , decodeTx = \_sealed ->
         ( Tx
             { txId = Hash ""
@@ -1427,6 +1429,7 @@ mockNetworkLayer = dummyNetworkLayer
     , currentProtocolParameters =
         pure (protocolParameters dummyNetworkParameters)
     , timeInterpreter = dummyTimeInterpreter
+    , eraHistory = error "mockNetworkLayer: eraHistory not implemented"
     , syncProgress =
         error "dummyNetworkLayer: syncProgress not implemented"
     }

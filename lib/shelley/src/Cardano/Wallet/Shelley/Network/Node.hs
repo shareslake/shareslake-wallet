@@ -69,6 +69,7 @@ import Cardano.Wallet.Primitive.Slotting
     ( TimeInterpreter
     , TimeInterpreterLog
     , currentRelativeTime
+    , getSystemStart
     , mkTimeInterpreter
     )
 import Cardano.Wallet.Primitive.SyncProgress
@@ -374,6 +375,10 @@ withNodeNetworkLayerBase tr net np conn versionData tol action = do
             fetchRewardAccounts tr queryRewardQ
         , timeInterpreter =
             _timeInterpreter (contramap MsgInterpreterLog tr) interpreterVar
+        , eraHistory = do
+            i <- atomically (readTMVar interpreterVar)
+            let systemStart = getSystemStart $ _timeInterpreter nullTracer interpreterVar
+            pure (Cardano.EraHistory Cardano.CardanoMode i, systemStart)
         , syncProgress = _syncProgress interpreterVar
         }
   where

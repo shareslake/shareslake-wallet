@@ -127,26 +127,19 @@ import Cardano.Wallet.Primitive.Passphrase
     , preparePassphrase
     )
 import Cardano.Wallet.Primitive.Slotting
-    ( TimeInterpreter, hoistTimeInterpreter, mkSingleEraInterpreter )
+    ( dummyEraHistory )
 import Cardano.Wallet.Primitive.Types
-    ( ActiveSlotCoefficient (ActiveSlotCoefficient)
-    , Block (..)
+    ( Block (..)
     , BlockHeader (..)
-    , EpochLength (EpochLength)
     , ExecutionUnitPrices (..)
     , ExecutionUnits (..)
     , FeePolicy (..)
-    , GenesisParameters (..)
     , LinearFunction (..)
     , MinimumUTxOValue (..)
     , PoolId (PoolId)
     , ProtocolParameters (..)
-    , SlotLength (SlotLength)
-    , SlottingParameters (..)
-    , StartTime (StartTime)
     , TokenBundleMaxSize (..)
     , TxParameters (..)
-    , getGenesisBlockDate
     )
 import Cardano.Wallet.Primitive.Types.Address
     ( Address (..) )
@@ -205,8 +198,6 @@ import Cardano.Wallet.Shelley.Compatibility
     , shelleyToCardanoEra
     , toCardanoLovelace
     , toCardanoTxIn
-    , toCardanoTxOut
-    , toCardanoUTxO
     , toCardanoValue
     )
 import Cardano.Wallet.Shelley.Compatibility.Ledger
@@ -273,8 +264,6 @@ import Data.Either
     ( isLeft, isRight )
 import Data.Function
     ( on, (&) )
-import Data.Functor.Identity
-    ( runIdentity )
 import Data.Generics.Internal.VL.Lens
     ( view )
 import Data.List
@@ -299,8 +288,6 @@ import Data.Set
     ( Set )
 import Data.Text
     ( Text )
-import Data.Time.Clock.POSIX
-    ( posixSecondsToUTCTime )
 import Data.Typeable
     ( Typeable, typeRep )
 import Data.Word
@@ -2829,18 +2816,6 @@ instance Arbitrary (PartialTx Cardano.AlonzoEra) where
         shrinkInputs [] =
             []
 
-resolvedInputsUTxO
-    :: ShelleyBasedEra era
-    -> PartialTx era
-    -> Cardano.UTxO era
-resolvedInputsUTxO era (PartialTx _ resolvedInputs _) =
-    Cardano.UTxO $ Map.fromList $ map convertUTxO resolvedInputs
-  where
-    convertUTxO (i, o, Nothing) =
-        (toCardanoTxIn i, toCardanoTxOut era o)
-    convertUTxO (_, _, Just _) =
-        error "resolvedInputsUTxO: todo: handle datum hash"
-
 instance Semigroup (Cardano.UTxO era) where
     Cardano.UTxO a <> Cardano.UTxO b = Cardano.UTxO (a <> b)
 
@@ -2974,7 +2949,7 @@ balanceTransaction' (Wallet' utxo wal pending) seed tx  =
             (Ctx @(Rand StdGen) nullTracer testTxLayer)
             (delegationAddress @'Mainnet)
             mockProtocolParametersForBalancing
-            dummyTimeInterpreter
+            dummyEraHistory
             (utxo, wal, pending)
             tx
 
@@ -3218,10 +3193,10 @@ prop_balanceTransactionValid
     -> Property
 prop_balanceTransactionValid wallet (ShowBuildable partialTx') seed
     = withMaxSuccess 1000 $ do
-        let combinedUTxO = mconcat
-                [ resolvedInputsUTxO Cardano.ShelleyBasedEraAlonzo partialTx
-                , toCardanoUTxO Cardano.ShelleyBasedEraAlonzo walletUTxO
-                ]
+        let combinedUTxO = toCardanoUTxO testTxLayer
+                walletUTxO
+                (view #inputs partialTx)
+
         let originalBalance = txBalance (view #tx partialTx) combinedUTxO
         let res = balanceTransaction'
                 wallet
@@ -3859,29 +3834,6 @@ readTestTransactions = runIO $ do
     listDirectory dir
         >>= traverse (\f -> (f,) <$> BS.readFile (dir </> f))
         >>= traverse (\(f,bs) -> (f,) <$> unsafeSealedTxFromHex bs)
-
-dummyTimeInterpreter :: Monad m => TimeInterpreter m
-dummyTimeInterpreter = hoistTimeInterpreter (pure . runIdentity)
-    $ mkSingleEraInterpreter
-        (getGenesisBlockDate dummyGenesisParameters)
-        dummySlottingParameters
-
-dummySlottingParameters :: SlottingParameters
-dummySlottingParameters = SlottingParameters
-    { getSlotLength = SlotLength 1
-    , getEpochLength = EpochLength 21600
-    , getActiveSlotCoefficient = ActiveSlotCoefficient 1
-    , getSecurityParameter = Quantity 2160
-    }
-
-dummyGenesisParameters :: GenesisParameters
-dummyGenesisParameters = GenesisParameters
-    { getGenesisBlockHash = genesisHash
-    , getGenesisBlockDate = StartTime $ posixSecondsToUTCTime 0
-    }
-
-genesisHash :: Hash "Genesis"
-genesisHash = Hash (B8.replicate 32 '0')
 
 --------------------------------------------------------------------------------
 -- Utilities

@@ -359,6 +359,7 @@ import Cardano.Wallet.Primitive.Passphrase
     )
 import Cardano.Wallet.Primitive.Slotting
     ( PastHorizonException (..)
+    , SystemStart
     , TimeInterpreter
     , addRelTime
     , ceilingSlotAt
@@ -1517,19 +1518,19 @@ normalizeDelegationAddress s addr = do
 -- the 'sealedTx'.
 data PartialTx era = PartialTx
     { tx :: Cardano.Tx era
-    , inputs :: [(TxIn, TxOut, Maybe (Hash "Datum"))]
+    , inputs :: Cardano.UTxO era
     , redeemers :: [Redeemer]
     } deriving (Show, Generic, Eq)
 
 instance Buildable (PartialTx era) where
     build (PartialTx tx ins redeemers) = nameF "PartialTx" $ mconcat
-        [ nameF "inputs" (listF' inF ins)
-        , nameF "redeemers" (pretty redeemers)
+        [ -- nameF "inputs" (listF' inF ins)
+         nameF "redeemers" (pretty redeemers)
         , nameF "tx" (cardanoTxF tx)
         ]
       where
-        inF :: (TxIn, TxOut, Maybe (Hash "Datum")) -> Builder
-        inF (i,o,d) = ""+|i|+" "+|o|+" "+|d|+""
+        --inF :: (TxIn, TxOut, Maybe (Hash "Datum")) -> Builder
+        --inF (i,o,d) = ""+|i|+" "+|o|+" "+|d|+""
 
         cardanoTxF :: Cardano.Tx era -> Builder
         cardanoTxF tx' = pretty $ pShow tx'
@@ -1545,7 +1546,7 @@ balanceTransaction
     => ctx
     -> ArgGenChange s
     -> (W.ProtocolParameters, Cardano.ProtocolParameters)
-    -> TimeInterpreter (Either PastHorizonException)
+    -> (Cardano.EraHistory Cardano.CardanoMode, SystemStart)
     -> (UTxOIndex WalletUTxO, Wallet s, Set Tx)
     -> PartialTx era
     -> ExceptT ErrBalanceTx m (Cardano.Tx era)
@@ -1571,7 +1572,7 @@ balanceTransactionWithSelectionStrategy
     => ctx
     -> ArgGenChange s
     -> (W.ProtocolParameters, Cardano.ProtocolParameters)
-    -> TimeInterpreter (Either PastHorizonException)
+    -> (Cardano.EraHistory Cardano.CardanoMode, SystemStart)
     -> (UTxOIndex WalletUTxO, Wallet s, Set Tx)
     -> SelectionStrategy
     -> PartialTx era
@@ -1583,8 +1584,10 @@ balanceTransactionWithSelectionStrategy
     ti
     (internalUtxoAvailable, wallet, _pendingTxs)
     selectionStrategy
-    ptx@(PartialTx partialTx externalInputs redeemers)
+    ptx@(PartialTx partialTx inputUTxO redeemers)
     = do
+
+
     guardExistingCollateral partialTx
     guardZeroAdaOutputs (extractOutputsFromTx $ toSealed partialTx)
     guardConflictingWithdrawalNetworks partialTx
@@ -1592,9 +1595,6 @@ balanceTransactionWithSelectionStrategy
     (balance0, minfee0) <- balanceAfterSettingMinFee partialTx
 
     (extraInputs, extraCollateral, extraOutputs) <- do
-        let externalSelectedUtxo = UTxOIndex.fromSequence $
-                map (\(i, TxOut a b,_datumHash) -> (WalletUTxO i a, b))
-                externalInputs
         -- TODO [ADP-1544] 'externalInputs' could conflict with the actual
         -- inputs in 'partialTx'.
         --
@@ -1642,6 +1642,8 @@ balanceTransactionWithSelectionStrategy
             (UTxOIndex.size internalUtxoAvailable)
             (BuildableInAnyEra Cardano.cardanoEra ptx)
 
+
+        let externalSelectedUtxo = extractExternallySelectedUTxO ptx
         let mSel = selectAssets'
                 (extractOutputsFromTx $ toSealed partialTx)
                 (UTxOSelection.fromIndexPair
@@ -1726,6 +1728,25 @@ balanceTransactionWithSelectionStrategy
 
     toSealed = sealedTxFromCardano . Cardano.InAnyCardanoEra Cardano.cardanoEra
 
+
+    extractExternallySelectedUTxO
+        :: PartialTx era
+        -> UTxOIndex WalletUTxO
+    extractExternallySelectedUTxO (PartialTx tx (Cardano.UTxO utxo) _rdms) =
+        UTxOIndex.fromSequence $ flip map txIns $ \(i, _) -> do
+            case Map.lookup i utxo of
+                Nothing -> error "extractExternallySelectedUTxO: todo"
+                Just o ->
+                    let
+                        i' = _fromCardanoTxIn tl i
+                        TxOut addr bundle = _fromCardanoTxOut tl o
+                    in
+                        (WalletUTxO i' addr, bundle)
+      where
+
+        Cardano.Tx (Cardano.TxBody (Cardano.TxBodyContent { Cardano.txIns })) _
+            = tx
+
     guardTxSize :: Cardano.Tx era -> ExceptT ErrBalanceTx m (Cardano.Tx era)
     guardTxSize tx = do
         let size = estimateSignedTxSize tl nodePParams tx
@@ -1746,9 +1767,7 @@ balanceTransactionWithSelectionStrategy
 
     txBalance :: Cardano.Tx era -> Cardano.Value
     txBalance tx =
-        evaluateTransactionBalance tl tx nodePParams utxo externalInputs
-      where
-        utxo = CS.toExternalUTxOMap $ UTxOIndex.toMap internalUtxoAvailable
+        evaluateTransactionBalance tl tx nodePParams combinedUTxO
 
     balanceAfterSettingMinFee
         :: Cardano.Tx era
@@ -1759,11 +1778,19 @@ balanceTransactionWithSelectionStrategy
         let minfee = evaluateMinimumFee tl nodePParams tx
         let update = TxUpdate [] [] [] (UseNewTxFee minfee)
         tx' <- left ErrBalanceTxUpdateError $ updateTx tl tx update
-        let balance = evaluateTransactionBalance tl tx' nodePParams
-                (CS.toExternalUTxOMap $ UTxOIndex.toMap internalUtxoAvailable)
-                (view #inputs ptx)
+        let balance = evaluateTransactionBalance tl tx' nodePParams combinedUTxO
         let minfee' = Cardano.Lovelace $ fromIntegral $ unCoin minfee
         return (balance, minfee')
+
+    combinedUTxO :: Cardano.UTxO era
+    combinedUTxO = Cardano.UTxO $ mconcat
+        [ unUTxO $ toCardanoUTxO tl
+            (CS.toExternalUTxOMap $ UTxOIndex.toMap internalUtxoAvailable) []
+        , unUTxO inputUTxO
+        ]
+      where
+        unUTxO (Cardano.UTxO u) = u
+
 
     assembleTransaction
         :: TxUpdate
@@ -1771,15 +1798,7 @@ balanceTransactionWithSelectionStrategy
     assembleTransaction update = ExceptT . pure $ do
         tx' <- left ErrBalanceTxUpdateError $ updateTx tl partialTx update
         left ErrBalanceTxAssignRedeemers $ assignScriptRedeemers
-            tl nodePParams ti resolveInput redeemers tx'
-      where
-        resolveInput :: TxIn -> Maybe (TxOut, Maybe (Hash "Datum"))
-        resolveInput i =
-            (\(_,o,d) -> (o,d))
-                <$> L.find (\(i',_,_) -> i == i') externalInputs
-            <|>
-            (\(_,o) -> (o, Nothing))
-                <$> L.find (\(i',_) -> i == i') (extraInputs update)
+            tl nodePParams ti combinedUTxO redeemers tx'
 
     guardZeroAdaOutputs outputs = do
         -- We seem to produce imbalanced transactions if zero-ada

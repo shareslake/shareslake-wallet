@@ -64,6 +64,9 @@ module Cardano.Wallet.Primitive.Slotting
     , snapshot
     , hoistTimeInterpreter
     , expectAndThrowFailures
+
+     -- * Cardano API
+    , dummyEraHistory
     ) where
 
 import Prelude
@@ -121,6 +124,13 @@ import GHC.Stack
     ( CallStack, HasCallStack, getCallStack, prettySrcLoc )
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types
     ( RelativeTime (..), SystemStart (SystemStart), addRelTime )
+import Ouroboros.Consensus.HardFork.History
+    ( Bound (..)
+    , EraEnd (EraUnbounded)
+    , EraParams (..)
+    , EraSummary (..)
+    , SafeZone (StandardSafeZone)
+    )
 import Ouroboros.Consensus.HardFork.History.EpochInfo
     ( interpreterToEpochInfo )
 import Ouroboros.Consensus.HardFork.History.Qry
@@ -135,15 +145,26 @@ import Ouroboros.Consensus.HardFork.History.Qry
     , wallclockToSlot
     )
 import Ouroboros.Consensus.HardFork.History.Summary
-    ( neverForksSummary )
+    ( Summary (..), neverForksSummary )
 import UnliftIO.Exception
     ( throwIO )
 
+import qualified Cardano.Api as Cardano
+import Cardano.Slotting.Slot
+    ( EpochSize (EpochSize) )
 import qualified Cardano.Slotting.Slot as Cardano
+import Cardano.Slotting.Time
+    ( mkSlotLength )
 import qualified Data.Text as T
+import Data.Time.Clock.POSIX
+    ( posixSecondsToUTCTime )
 import qualified Ouroboros.Consensus.BlockchainTime.WallClock.Types as Cardano
+import Ouroboros.Consensus.HardFork.History
+    ( EraEnd (EraEnd) )
 import qualified Ouroboros.Consensus.HardFork.History.Qry as HF
 import qualified Ouroboros.Consensus.HardFork.History.Summary as HF
+import Ouroboros.Consensus.Util.Counting
+    ( NonEmpty (NonEmptyCons, NonEmptyOne) )
 
 {-------------------------------------------------------------------------------
                                     Queries
@@ -385,6 +406,8 @@ currentEpoch ti = do
 -- with a system start time as context.
 data TimeInterpreter m = forall eras. TimeInterpreter
     { interpreter :: m (Interpreter eras)
+     -- ^ NOTE:  interpreter ti cannot throw PastHorizonException, but
+     -- this way we don't have to carry around yet another type parameter.
     , blockchainStartTime :: StartTime
     , tracer :: Tracer m TimeInterpreterLog
     , handleResult :: forall a. Either PastHorizonException a -> m a
@@ -611,3 +634,54 @@ unsafeExtendSafeZone = f . neverFails r
         , handleResult = h
         }
     r = "unsafeExtendSafeZone should make PastHorizonExceptions impossible."
+
+
+{-------------------------------------------------------------------------------
+                        Cardano API EraHistory
+-------------------------------------------------------------------------------}
+
+dummyEraHistory :: (Cardano.EraHistory Cardano.CardanoMode, SystemStart)
+dummyEraHistory =
+    ( Cardano.EraHistory Cardano.CardanoMode int
+    , SystemStart $ posixSecondsToUTCTime 0
+    )
+  where
+    int = mkInterpreter summary
+
+    eraParams = EraParams
+            { eraEpochSize = EpochSize 432000
+            , eraSlotLength = mkSlotLength 1
+            , eraSafeZone = StandardSafeZone 129600
+            }
+
+    emptyEra = EraSummary
+            { eraStart = Bound
+                { boundTime = RelativeTime 0
+                , boundSlot = 0
+                , boundEpoch = Cardano.EpochNo 0
+                }
+            , eraEnd = EraEnd Bound
+                { boundTime = RelativeTime 0
+                , boundSlot = 0
+                , boundEpoch = Cardano.EpochNo 0
+                }
+            , eraParams = eraParams
+            }
+
+    summary =
+        Summary
+            { getSummary =
+                NonEmptyCons emptyEra -- Byron
+                $ NonEmptyCons emptyEra -- Shelley
+                $ NonEmptyCons emptyEra -- Allegra
+                $ NonEmptyCons emptyEra -- Mary
+                $ NonEmptyOne EraSummary -- Alonzo
+                    { eraStart = Bound
+                        { boundTime = RelativeTime 0
+                        , boundSlot = 0
+                        , boundEpoch = Cardano.EpochNo 0
+                        }
+                    , eraEnd = EraUnbounded
+                    , eraParams = eraParams
+                    }
+            }

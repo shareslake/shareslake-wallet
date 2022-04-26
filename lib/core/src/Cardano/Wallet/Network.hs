@@ -46,7 +46,7 @@ import Cardano.BM.Data.Tracer
 import Cardano.Wallet.Primitive.BlockSummary
     ( LightSummary )
 import Cardano.Wallet.Primitive.Slotting
-    ( PastHorizonException, TimeInterpreter )
+    ( PastHorizonException, SystemStart, TimeInterpreter )
 import Cardano.Wallet.Primitive.SyncProgress
     ( SyncProgress (..) )
 import Cardano.Wallet.Primitive.Types
@@ -100,6 +100,7 @@ import UnliftIO.Async
 import UnliftIO.Concurrent
     ( threadDelay )
 
+import qualified Cardano.Api as Cardano
 import qualified Data.List.NonEmpty as NE
 
 {-------------------------------------------------------------------------------
@@ -174,6 +175,10 @@ data NetworkLayer m block = NetworkLayer
 
     , timeInterpreter
         :: TimeInterpreter (ExceptT PastHorizonException m)
+
+    , eraHistory
+        :: m (Cardano.EraHistory Cardano.CardanoMode, SystemStart)
+
     , syncProgress
         :: SlotNo -> m (SyncProgress)
     }

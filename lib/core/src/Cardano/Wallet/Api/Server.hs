@@ -349,7 +349,7 @@ import Cardano.Wallet.DB
 import Cardano.Wallet.DB.Sqlite.AddressBook
     ( AddressBookIso )
 import Cardano.Wallet.Network
-    ( NetworkLayer, fetchRewardAccountBalances, timeInterpreter )
+    ( NetworkLayer, eraHistory, fetchRewardAccountBalances, timeInterpreter )
 import Cardano.Wallet.Primitive.AddressDerivation
     ( DelegationAddress (..)
     , Depth (..)
@@ -2462,15 +2462,19 @@ balanceTransaction ctx genChange (ApiT wid) body = do
     let nodePParams = fromJust $ W.currentNodeProtocolParameters pp
     withWorkerCtx ctx wid liftE liftE $ \wrk -> do
         wallet <- liftHandler $ W.readWalletUTxOIndex @_ @s @k wrk wid
-        ti <- liftIO $ snapshot $ timeInterpreter $ ctx ^. networkLayer
+        ti <- liftIO $ eraHistory $ ctx ^. networkLayer
+
 
         let mkPartialTx
-                :: forall era. Cardano.Tx era
+                :: forall era. Cardano.IsShelleyBasedEra era => Cardano.Tx era
                 -> W.PartialTx era
             mkPartialTx tx = W.PartialTx
                     tx
-                    (fromExternalInput <$> body ^. #inputs)
+                    (convertToCardano $ fromExternalInput <$> body ^. #inputs)
                     (fromApiRedeemer <$> body ^. #redeemers)
+              where
+                convertToCardano xs =
+                    toCardanoUTxO (wrk ^. W.transactionLayer @k) mempty xs
 
         let balanceTx
                 :: forall era. Cardano.IsShelleyBasedEra era

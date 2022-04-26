@@ -67,7 +67,7 @@ import Cardano.Wallet.Primitive.AddressDerivation
 import Cardano.Wallet.Primitive.Passphrase
     ( Passphrase )
 import Cardano.Wallet.Primitive.Slotting
-    ( PastHorizonException, TimeInterpreter )
+    ( PastHorizonException, SystemStart )
 import Cardano.Wallet.Primitive.Types
     ( Certificate
     , FeePolicy
@@ -236,8 +236,7 @@ data TransactionLayer k tx = TransactionLayer
         :: forall era. Cardano.IsShelleyBasedEra era
         => Cardano.Tx era
         -> Cardano.ProtocolParameters
-        -> UTxO
-        -> [(TxIn, TxOut, Maybe (Hash "Datum"))] -- Extra UTxO
+        -> Cardano.UTxO era
         -> Cardano.Value
         -- ^ Evaluate the balance of a transaction using the ledger. The balance
         -- is defined as @(value consumed by transaction) - (value produced by
@@ -325,15 +324,30 @@ data TransactionLayer k tx = TransactionLayer
         :: forall era. Cardano.IsShelleyBasedEra era
         => Cardano.ProtocolParameters
             -- Current protocol parameters
-        -> TimeInterpreter (Either PastHorizonException)
-            -- Time interpreter in the Monad m
-        -> (TxIn -> Maybe (TxOut, Maybe (Hash "Datum")))
-            -- A input resolver for transactions' inputs containing scripts.
+        -> (Cardano.EraHistory Cardano.CardanoMode, SystemStart)
+        -> Cardano.UTxO era
         -> [Redeemer]
             -- A list of redeemers to set on the transaction.
         -> (Cardano.Tx era)
             -- Transaction containing scripts
         -> (Either ErrAssignRedeemers (Cardano.Tx era))
+
+    , toCardanoUTxO
+        :: forall era. Cardano.IsShelleyBasedEra era
+        => UTxO
+        -> [(TxIn, TxOut, Maybe (Hash "Datum"))]
+        -> Cardano.UTxO era
+        -- ^ Temporary hack to allow access to conversion in balanceTransaction
+
+    , _fromCardanoTxIn
+        :: Cardano.TxIn -> TxIn
+        -- ^ Temporary hack to allow access to conversion in balanceTransaction
+
+    , _fromCardanoTxOut
+        :: forall era ctx. Cardano.IsCardanoEra era
+        => Cardano.TxOut ctx era
+        -> TxOut
+        -- ^ Temporary hack to allow access to conversion in balanceTransaction
     }
 
 -- | Method to use when updating the fee of a transaction.
@@ -493,6 +507,10 @@ data ErrAssignRedeemers
     -- ^ Evaluating the Plutus script failed past the visible horizon.
     | ErrAssignRedeemersUnresolvedTxIns [TxIn]
     -- ^ The transaction contains inputs which couldn't be resolved.
+    | ErrAssignRedeemersOtherError String
+    -- ^ String containing a Cardano.ScriptExecutionError
+    --
+    -- TODO: Rethink the entire 'ErrAssignRedeemers' and related logic.
     deriving (Generic, Eq, Show)
 
 -- | Possible signing error
