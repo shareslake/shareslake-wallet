@@ -2444,7 +2444,7 @@ mkTxMetaWithoutSel blockHeader txCtx inps outs =
        , slotNo = blockHeader ^. #slotNo
        , blockHeight = blockHeader ^. #blockHeight
        , amount = Coin.distance amtInps amtOuts
-       , expiry = Just (txTimeToLive txCtx)
+       , expiry = Just (snd $ txValidityInterval txCtx)
        }
 
 ourCoin
@@ -2499,7 +2499,7 @@ mkTxMeta ti' blockHeader wState txCtx sel =
                 , slotNo = blockHeader ^. #slotNo
                 , blockHeight = blockHeader ^. #blockHeight
                 , amount = Coin.distance amtInps amtOuts
-                , expiry = Just (txTimeToLive txCtx)
+                , expiry = Just (snd $ txValidityInterval txCtx)
                 }
             )
   where
