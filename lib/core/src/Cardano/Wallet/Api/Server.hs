@@ -2530,7 +2530,7 @@ decodeTransaction
     -> ApiSerialisedTransaction
     -> Handler (ApiDecodedTransaction n)
 decodeTransaction ctx (ApiT wid) (ApiSerialisedTransaction (ApiT sealed)) = do
-    let (decodedTx, toMint, toBurn, allCerts) = decodeTx tl sealed
+    let (decodedTx, toMint, toBurn, allCerts, interval) = decodeTx tl sealed
     let (Tx { txId
             , fee
             , resolvedInputs
@@ -2586,6 +2586,7 @@ decodeTransaction ctx (ApiT wid) (ApiSerialisedTransaction (ApiT sealed)) = do
                     (toApiAnyCert acct acctPath <$> allCerts)
         , metadata = ApiTxMetadata $ ApiT <$> metadata
         , scriptValidity = ApiT <$> scriptValidity
+        , validityInterval = interval
         }
   where
     tl = ctx ^. W.transactionLayer @k
@@ -2768,7 +2769,7 @@ submitTransaction ctx apiw@(ApiT wid) apitx@(ApiSerialisedTransaction (ApiT seal
             $ W.submitTx @_ @s @k wrk wid (tx, txMeta, sealedTx)
     return $ ApiTxId (apiDecoded ^. #id)
   where
-    (tx,_,_,_) = decodeTx tl sealedTx
+    (tx,_,_,_,_) = decodeTx tl sealedTx
     tl = ctx ^. W.transactionLayer @k
     ti :: TimeInterpreter (ExceptT PastHorizonException IO)
     nl = ctx ^. networkLayer
