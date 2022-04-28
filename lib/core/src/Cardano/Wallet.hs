@@ -3464,6 +3464,7 @@ data ErrConstructTx
     | ErrConstructTxAssetNameTooLong
     | ErrConstructTxMintOrBurnAssetQuantityOutOfBounds
     | ErrConstructTxWrongValidityBounds
+    | ErrConstructTxValidityIntervalNotWithinScriptTimelock
     | ErrConstructTxNotImplemented String
     -- ^ Temporary error constructor.
     deriving (Show, Eq)
