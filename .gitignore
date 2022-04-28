@@ -48,3 +48,10 @@ lib/shelley/test/data/balanceTx/**/actual
 
 ### Docs build
 /_build/
+0-percent-seq.json
+0-percent-seq.timelog
+1-wallets-to-0.1.json
+10-wallets-to-0.01.json
+100-wallets-to-0.01.json
+baseline.timelog
+bench-restore
