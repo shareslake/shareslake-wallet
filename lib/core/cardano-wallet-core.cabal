@@ -342,6 +342,7 @@ test-suite unit
     , contra-tracer
     , cryptonite
     , data-default
+    , data-interval
     , dbvar
     , directory
     , deepseq
