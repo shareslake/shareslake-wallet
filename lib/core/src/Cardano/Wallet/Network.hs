@@ -176,6 +176,8 @@ data NetworkLayer m block = NetworkLayer
         :: TimeInterpreter (ExceptT PastHorizonException m)
     , syncProgress
         :: SlotNo -> m (SyncProgress)
+        -- ^ compute the ratio between the number in the argument and  
+        -- the total slots in the node
     }
 
 -- | In light-mode, we receive either a list of blocks as usual,
