@@ -1566,7 +1566,7 @@ binaryCalculationsSpec' era = describe ("calculateBinary - "+||era||+"") $ do
           addrWits = zipWith (mkByronWitness' unsigned) inps pairs
           fee = toCardanoLovelace $ selectionDelta txOutCoin cs
           Right unsigned =
-              mkUnsignedTx era slotNo cs md mempty [] fee
+              mkUnsignedTx era (Nothing, slotNo) cs md mempty [] fee
               TokenMap.empty TokenMap.empty Map.empty
           cs = Selection
             { inputs = NE.fromList inps
@@ -1657,7 +1657,7 @@ makeShelleyTx era testCase = Cardano.makeSignedTransaction addrWits unsigned
     inps = Map.toList $ unUTxO utxo
     fee = toCardanoLovelace $ selectionDelta txOutCoin cs
     Right unsigned =
-        mkUnsignedTx era slotNo cs md mempty [] fee
+        mkUnsignedTx era (Nothing, slotNo) cs md mempty [] fee
         TokenMap.empty TokenMap.empty Map.empty
     addrWits = map (mkShelleyWitness unsigned) pairs
     cs = Selection
@@ -1700,7 +1700,7 @@ makeByronTx era testCase = Cardano.makeSignedTransaction byronWits unsigned
     inps = Map.toList $ unUTxO utxo
     fee = toCardanoLovelace $ selectionDelta txOutCoin cs
     Right unsigned =
-        mkUnsignedTx era slotNo cs Nothing mempty [] fee
+        mkUnsignedTx era (Nothing, slotNo) cs Nothing mempty [] fee
         TokenMap.empty TokenMap.empty Map.empty
     -- byronWits = map (mkByronWitness unsigned ntwrk Nothing) pairs
     byronWits = map (error "makeByronTx: broken") pairs  -- TODO: [ADP-919]
@@ -2216,7 +2216,7 @@ balanceTransactionSpec = do
 
             let balance = balanceTransaction' wallet testStdGenSeed
             let totalOutput tx =
-                    let (wtx, _, _, _) = decodeTx testTxLayer tx
+                    let (wtx, _, _, _, _) = decodeTx testTxLayer tx
                     in
                         F.foldMap (view (#tokens . #coin)) (view #outputs wtx)
                         <> fromMaybe (Coin 0) (view #fee wtx)
@@ -3730,24 +3730,24 @@ estimateSignedTxSizeSpec =
     forAllGoldens goldens f = forM_ goldens $ \x ->
         Hspec.counterexample (show x) $ f x
 
-fst4 :: (a, b, c, d) -> a
-fst4 (a,_,_,_) = a
+fst5 :: (a, b, c, d, e) -> a
+fst5 (a,_,_,_, _) = a
 
 sealedInputs :: SealedTx -> Set TxIn
 sealedInputs =
-    Set.fromList . map fst . view #resolvedInputs . fst4 . _decodeSealedTx
+    Set.fromList . map fst . view #resolvedInputs . fst5 . _decodeSealedTx
 
 sealedCollateralInputs :: SealedTx -> Set TxIn
 sealedCollateralInputs
     = Set.fromList
     . map fst
     . view #resolvedCollateralInputs
-    . fst4
+    . fst5
     . _decodeSealedTx
 
 sealedOutputs :: SealedTx -> Set TxOut
 sealedOutputs =
-    Set.fromList . view #outputs . fst4 . _decodeSealedTx
+    Set.fromList . view #outputs . fst5 . _decodeSealedTx
 
 sealedNumberOfRedeemers :: SealedTx -> Int
 sealedNumberOfRedeemers sealedTx =
@@ -3768,7 +3768,7 @@ sealedNumberOfRedeemers sealedTx =
 
 sealedFee :: SealedTx -> Maybe Coin
 sealedFee =
-    view #fee . fst4 . _decodeSealedTx
+    view #fee . fst5 . _decodeSealedTx
 
 paymentPartialTx :: [TxOut] -> PartialTx
 paymentPartialTx txouts = PartialTx (sealedTxFromCardanoBody body) [] []

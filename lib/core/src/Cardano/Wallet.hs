@@ -1810,7 +1810,7 @@ balanceTransactionWithSelectionStrategy
             throwE ErrBalanceTxZeroAdaOutput
 
     extractOutputsFromTx tx =
-        let (Tx {outputs}, _, _, _) = decodeTx tl tx
+        let (Tx {outputs}, _, _, _, _) = decodeTx tl tx
         in outputs
 
     guardConflictingWithdrawalNetworks (cardanoTx ->
@@ -2444,7 +2444,7 @@ mkTxMetaWithoutSel blockHeader txCtx inps outs =
        , slotNo = blockHeader ^. #slotNo
        , blockHeight = blockHeader ^. #blockHeight
        , amount = Coin.distance amtInps amtOuts
-       , expiry = Just (txTimeToLive txCtx)
+       , expiry = Just (snd $ txValidityInterval txCtx)
        }
 
 ourCoin
@@ -2499,7 +2499,7 @@ mkTxMeta ti' blockHeader wState txCtx sel =
                 , slotNo = blockHeader ^. #slotNo
                 , blockHeight = blockHeader ^. #blockHeight
                 , amount = Coin.distance amtInps amtOuts
-                , expiry = Just (txTimeToLive txCtx)
+                , expiry = Just (snd $ txValidityInterval txCtx)
                 }
             )
   where
@@ -2557,7 +2557,7 @@ submitExternalTx ctx sealedTx = traceResult trPost $ do
     tl = ctx ^. transactionLayer @k
     nw = ctx ^. networkLayer
     trPost = contramap (MsgSubmitExternalTx (tx ^. #txId)) (ctx ^. logger)
-    (tx, _, _, _) = decodeTx tl sealedTx
+    (tx, _, _, _, _) = decodeTx tl sealedTx
 
 -- | Remove a pending or expired transaction from the transaction history. This
 -- happens at the request of the user. If the transaction is already on chain,
@@ -3463,6 +3463,8 @@ data ErrConstructTx
     | ErrConstructTxWrongMintingBurningTemplate
     | ErrConstructTxAssetNameTooLong
     | ErrConstructTxMintOrBurnAssetQuantityOutOfBounds
+    | ErrConstructTxWrongValidityBounds
+    | ErrConstructTxValidityIntervalNotWithinScriptTimelock
     | ErrConstructTxNotImplemented String
     -- ^ Temporary error constructor.
     deriving (Show, Eq)

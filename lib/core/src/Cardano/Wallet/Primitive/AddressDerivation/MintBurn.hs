@@ -29,6 +29,8 @@ module Cardano.Wallet.Primitive.AddressDerivation.MintBurn
     , policyDerivationPath
     , toTokenMapAndScript
     , toTokenPolicyId
+    , toSlotInterval
+    , withinSlotInterval
     ) where
 
 import Prelude
@@ -57,6 +59,8 @@ import Cardano.Wallet.Primitive.AddressDiscovery
     ( coinTypeAda )
 import Cardano.Wallet.Primitive.Passphrase
     ( Passphrase (..) )
+import Cardano.Wallet.Primitive.Types
+    ( SlotNo (..) )
 import Cardano.Wallet.Primitive.Types.Hash
     ( Hash (..) )
 import Cardano.Wallet.Primitive.Types.TokenMap
@@ -67,16 +71,22 @@ import Cardano.Wallet.Primitive.Types.TokenQuantity
     ( TokenQuantity (..) )
 import Cardano.Wallet.Util
     ( invariant )
+import Data.Interval
+    ( Interval, (<=..<=) )
 import Data.List.NonEmpty
     ( NonEmpty )
 import Data.Map.Strict
     ( Map )
 import Data.Maybe
     ( isJust )
+import Data.Word
+    ( Word64 )
 import Numeric.Natural
     ( Natural )
 
 import qualified Cardano.Address.Script as CA
+import qualified Data.Interval as I
+import qualified Data.List as L
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 
@@ -190,3 +200,60 @@ replaceCosigner cosignerMap = \case
                 (Map.lookup c cosignerMap)
                 isJust
         in hashVerificationKey @key CA.Policy (liftRawKey xpub)
+
+toSlotInterval
+    :: Script a
+    -> [Interval Natural]
+toSlotInterval = \case
+    RequireSignatureOf _ ->
+        [allSlots]
+    RequireAllOf xs ->
+        let (timelocks, rest) = L.partition isTimelockOrSig xs
+        in
+        trimAllSlots
+            $ I.intersections (concatMap toSlotInterval timelocks)
+            : concatMap toSlotInterval rest
+    RequireAnyOf xs ->
+        concatMap toSlotInterval (filterOutSig xs)
+    RequireSomeOf _ xs ->
+        concatMap toSlotInterval (filterOutSig xs)
+    ActiveFromSlot s ->
+        [fromIntegral s <=..<= maxSlot]
+    ActiveUntilSlot s ->
+        [minSlot <=..<= fromIntegral s]
+  where
+    minSlot = fromIntegral $ minBound @Word64
+    maxSlot = fromIntegral $ maxBound @Word64
+    allSlots = minSlot <=..<= maxSlot
+
+    isNotSig = \case
+        RequireSignatureOf _ -> False
+        _ -> True
+
+    isTimelockOrSig = \case
+        ActiveFromSlot _ -> True
+        ActiveUntilSlot _ -> True
+        RequireSignatureOf _ -> True
+        _ -> False
+
+    trimAllSlots interval =
+        let notAllSlots = filter (/= allSlots) interval
+        in
+        if L.null notAllSlots
+        then interval
+        else notAllSlots
+
+    filterOutSig = filter isNotSig
+
+-- tx validity interval must be a subset of a interval from script's timelock
+-- tx validity interval is defined by specifying (from,to) slot interval
+withinSlotInterval
+    :: SlotNo
+    -> SlotNo
+    -> [Interval Natural]
+    -> Bool
+withinSlotInterval (SlotNo from) (SlotNo to) =
+    L.any (txValidityInterval `I.isSubsetOf`)
+  where
+    txValidityInterval =
+        fromIntegral from <=..<= fromIntegral to
