@@ -137,8 +137,8 @@ source-repository-package
 
 source-repository-package
     type: git
-    location: https://github.com/input-output-hk/cardano-ledger
-    tag: 1a9ec4ae9e0b09d54e49b2a40c4ead37edadcce5
+    location: https://github.com/shareslake/shareslake-ledger
+    tag: 06e7a6b1683fe0b398399fe413fcf3bfdd3fec5a 
     subdir:
       eras/alonzo/impl
       eras/alonzo/test-suite

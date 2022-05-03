@@ -1380,7 +1380,7 @@ instance FromText ProtocolMagic where
 
 -- | Hard-coded protocol magic for the Byron MainNet
 mainnetMagic :: ProtocolMagic
-mainnetMagic =  ProtocolMagic 764824073
+mainnetMagic =  ProtocolMagic 777333
 
 -- | Derive testnet magic from a type-level Nat
 testnetMagic :: forall pm. KnownNat pm => ProtocolMagic

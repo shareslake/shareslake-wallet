@@ -44,8 +44,8 @@ genDelegs:
 updateQuorum: 1
 maxMajorPV: 25446
 maxLovelaceSupply: 1000000000000000000
-protocolMagicId: 764824073
-networkMagic: 764824073
+protocolMagicId: 777333
+networkMagic: 777333
 networkId: Mainnet
 epochLength: 100
 staking:

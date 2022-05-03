@@ -170,8 +170,8 @@ extra-deps:
 - git: https://github.com/input-output-hk/cardano-crypto
   commit: f73079303f663e028288f9f4a9e08bcca39a923e
 
-- git: https://github.com/input-output-hk/cardano-ledger
-  commit: 1a9ec4ae9e0b09d54e49b2a40c4ead37edadcce5
+- git: https://github.com/shareslake/shareslake-ledger
+  commit: 06e7a6b1683fe0b398399fe413fcf3bfdd3fec5a
   subdirs:
   - eras/alonzo/impl
   - eras/alonzo/test-suite

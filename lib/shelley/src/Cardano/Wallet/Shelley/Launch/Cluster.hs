@@ -1587,7 +1587,7 @@ waitForSocket tr conn = do
     cliRetry tr msg =<< cliConfigNode tr conn
         ["query", "tip"
         , "--mainnet"
-        --, "--testnet-magic", "764824073"
+        --, "--testnet-magic", "777333"
         , "--cardano-mode"
         ]
     traceWith tr $ MsgSocketIsReady conn
